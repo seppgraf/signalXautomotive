@@ -1,14 +1,16 @@
 # CAN → Ethernet Protocol Overview
 ### Infineon AURIX TC4 — Data Routing Engine (DRE)
-> Part of the **signalXautomotive** S2S Infrastructure
+> Part of the **signalXautomotive** Gateway Infrastructure — CAN to Ethernet Transport Layer
 
 ---
 
 ## 1. Introduction
 
-This document describes the signal conversion protocol from **CAN / CAN FD** to **Automotive Ethernet** using the **Infineon AURIX TC4** microcontroller family and its integrated **Data Routing Engine (DRE)**.
+This document describes the CAN / CAN FD to Automotive Ethernet **frame transport protocol** implemented entirely in hardware by the **Infineon AURIX TC4** microcontroller family via its integrated **Data Routing Engine (DRE)**. All conversion between CAN and Ethernet is performed exclusively by the DRE hardware — no software conversion is involved in the transport path described here.
 
-The AURIX TC4 serves as a **zonal or domain gateway ECU** — bridging legacy CAN networks (body, chassis, powertrain) with the high-bandwidth Ethernet backbone used by modern ADAS, central compute, and OTA subsystems.
+The AURIX TC4 serves as a **zonal or domain gateway ECU** — bridging legacy CAN networks (body, chassis, powertrain) with the high-bandwidth Ethernet backbone used by modern ADAS, central compute, and cloud-connected architectures.
+
+> **Scope:** This document covers only the CAN → Ethernet frame transport layer (HW DRE path). Signal-to-Service (S2S) normalization and service exposure are addressed in a separate document.
 
 ---
 
@@ -22,39 +24,39 @@ The AURIX TC4 serves as a **zonal or domain gateway ECU** — bridging legacy CA
 │  │ CAN FD 0 │  │ CAN FD 1 │  │ CAN FD n │   ← Physical CAN Buses   │
 │  └────┬─────┘  └────┬─────┘  └────┬─────┘                           │
 │       │              │              │                                 │
-│  ─────┴──────────────┴──────────────┴─────────────────────────────  │
+│  ─────┴──────────────┴──────────────┴─────────────────────────────── │
 │                     Message Buffer (HW FIFO)                         │
-│  ─────────────────────────────────────────────────────────────────  │
+│  ─────────────────────────────────────────────────────────────────── │
 │                                                                      │
 │          ┌───────────────────────────────────────┐                  │
 │          │     DRE  (Data Routing Engine)         │                  │
 │          │  ┌──────────┐   ┌────────────────────┐│                  │
-│          │  │ Filter / │   │  Protocol Adapt /  ││                  │
-│          │  │ Route    │──▶│  PDU Transformer   ││                  │
-│          │  │ Tables   │   │  (CAN ↔ SOME/IP)   ││                  │
+│          │  │ Filter / │   │  Frame Encapsulation││                  │
+│          │  │ Route    │──▶│  (CAN PDU →        ││                  │
+│          │  │ Tables   │   │   SOME/IP / UDP)    ││                  │
 │          │  └──────────┘   └────────────────────┘│                  │
 │          │          ▲              │               │                  │
 │          │          │      ┌───────▼──────────┐   │                  │
 │          │          │      │  Security / Auth  │   │                  │
 │          │          │      │  (SecOC / MACsec) │   │                  │
 │          │          │      └───────────────────┘   │                  │
-│          └───────────────────────┬───────────────--┘                  │
+│          └───────────────────────┬────────────────┘                  │
 │                                  │                                   │
 │          ┌───────────────────────▼───────────────┐                  │
 │          │       Ethernet MAC (100/1000BASE-T1)   │                  │
-│          └───────────────────────────────────────-┘                  │
+│          └───────────────────────────────────────┘                  │
 │                                  │                                   │
-└──────────────────────────────────┼───────────────────────────────────┘
+└──────────────────────────────────┼──────────────────────────────────┘
                                    │
                     ┌──────────────▼──────────────┐
                     │   Automotive Ethernet Spine  │
                     │  (100BASE-T1 / 1000BASE-T1)  │
-                    └─────────────────────────────-┘
+                    └──────────────────────────────┘
 ```
 
 ---
 
-## 3. Signal Conversion Flow (CAN → Ethernet)
+## 3. CAN → Ethernet Frame Transport Flow
 
 ```
 Step 1 ─ CAN Frame Reception
@@ -69,35 +71,37 @@ Step 2 ─ Buffering & Filtering (Hardware FIFO)
   ┌────────────────────────────────────────────────────────────────┐
   │  DRE applies configurable filter/routing tables:              │
   │  • CAN-ID whitelist / blacklist                               │
-  │  • Message ID → Ethernet Service ID mapping                   │
+  │  • CAN-ID → Ethernet destination mapping                      │
   │  • Rate limiting / debounce rules                             │
   └────────────────────────────────────────────────────────────────┘
                           │
                           ▼
-Step 3 ─ PDU Extraction & Signal Unpacking
+Step 3 ─ Frame Payload Passthrough (HW — zero-copy)
   ┌────────────────────────────────────────────────────────────────┐
-  │  Raw CAN bytes are deserialized into Signal PDUs:             │
-  │  • Big / Little Endian byte order conversion                  │
-  │  • Bit-level signal extraction (startBit, bitLength, factor)  │
-  │  • Physical value computation: val = raw × factor + offset    │
+  │  The raw CAN frame payload (0–64 bytes) is passed through     │
+  │  as-is to the Ethernet encapsulation stage.                   │
+  │  • No signal-level decomposition                              │
+  │  • No byte-order conversion or factor/offset scaling          │
+  │  • DRE operates at PDU/frame level; CPU is not involved       │
   └────────────────────────────────────────────────────────────────┘
                           │
                           ▼
-Step 4 ─ Protocol Adaptation (CAN → SOME/IP / UDP)
+Step 4 ─ Ethernet Encapsulation (HW — DRE)
   ┌────────────────────────────────────────────────────────────────┐
-  │  Signals are re-serialized into Ethernet payload:             │
+  │  The CAN frame payload is encapsulated by the DRE HW into:   │
   │                                                               │
   │  SOME/IP Header (16 bytes):                                   │
   │  [ Service ID | Method ID | Length | Client ID |             │
   │    Session ID | Version | Msg Type | Return Code ]           │
   │                                                               │
-  │  Payload: serialized signal values (SOME/IP serialization)    │
+  │  CAN-ID → SOME/IP Service/Method ID mapping is resolved      │
+  │  entirely via the DRE HW routing table (no SW intervention).  │
   │                                                               │
   │  Wrapped in:  UDP/IP → Ethernet Frame (IEEE 802.3)            │
   └────────────────────────────────────────────────────────────────┘
                           │
                           ▼
-Step 5 ─ Security Processing (optional, SecOC / MACsec)
+Step 5 ─ Security Processing (optional, SecOC / MACsec — HW)
   ┌────────────────────────────────────────────────────────────────┐
   │  • SecOC: appends Freshness Value + MAC tag to payload        │
   │  • MACsec: frame-level encryption at Ethernet layer           │
@@ -119,15 +123,15 @@ Step 6 ─ Ethernet Frame Transmission (100/1000BASE-T1)
 Ethernet Frame arrives at MAC
           │
           ▼
-SOME/IP / UDP Parsing
-  • Extract Service ID → map to CAN-ID via routing table
-  • Deserialize payload → extract signal values
+SOME/IP / UDP Parsing (DRE HW)
+  • Extract SOME/IP Service ID → map to CAN-ID via HW routing table
+  • Extract raw payload bytes (no signal-level deserialization)
           │
           ▼
-CAN Frame Assembly
-  • Pack signal values back into CAN data bytes
-  • Apply endianness, scaling (reverse factor/offset)
-  • Set CAN-ID, DLC
+CAN Frame Assembly (DRE HW)
+  • Insert raw payload bytes into CAN data field
+  • Set CAN-ID and DLC per routing table entry
+  • No endianness conversion or factor/offset scaling at this stage
           │
           ▼
 CAN FD Module Transmission onto target CAN bus
@@ -139,13 +143,6 @@ CAN FD Module Transmission onto target CAN bus
 
 ```
 ┌──────────────────────────────────────────────┐
-│            Application Layer                  │
-│   CAN Gateway SWC  /  Adaptive AUTOSAR App   │
-├──────────────────────────────────────────────┤
-│         PDU Router (AUTOSAR COM Stack)        │
-│  • CAN NM / CAN TP                            │
-│  • SOME/IP-SD (Service Discovery)             │
-├──────────────────────────────────────────────┤
 │      Transport / Network Layer                │
 │   UDP · TCP · IP (IPv4 / IPv6)               │
 ├──────────────────────────────────────────────┤
@@ -157,6 +154,8 @@ CAN FD Module Transmission onto target CAN bus
 └──────────────────────────────────────────────┘
 ```
 
+> **Note:** Application-layer software components (CAN Gateway SWC, AUTOSAR PDU Router, SOME/IP-SD) are **not** part of the HW transport path described in this document and are out of scope here.
+
 ---
 
 ## 6. Key Protocols & Standards
@@ -164,9 +163,8 @@ CAN FD Module Transmission onto target CAN bus
 | Protocol | Layer | Role in Gateway |
 |---|---|---|
 | **CAN / CAN FD** | Physical + Data Link | Source bus (up to 64 B payload at 8 Mbit/s) |
-| **SOME/IP** | Application | Signal encapsulation over Ethernet |
-| **SOME/IP-SD** | Application | Dynamic service discovery |
-| **DoIP** | Application | Diagnostic messages (UDS) over Ethernet |
+| **SOME/IP** | Application | CAN PDU transport encapsulation over Ethernet |
+| **DoIP** | Application | Diagnostic messages (UDS) over Ethernet *(diagnostic path only, separate from frame routing)* |
 | **UDP / TCP** | Transport | SOME/IP transport; TCP for reliable channels |
 | **IPv4 / IPv6** | Network | Addressing and routing |
 | **VLAN (802.1Q)** | Data Link | Traffic segmentation / QoS |
@@ -174,7 +172,6 @@ CAN FD Module Transmission onto target CAN bus
 | **1000BASE-T1** | Physical | Single-pair automotive Ethernet (1 Gbit/s) |
 | **SecOC** | Security | CAN/Ethernet message authentication |
 | **MACsec (802.1AE)** | Security | Ethernet frame-level encryption |
-| **AUTOSAR PDU Router** | Middleware | Message routing between busses |
 
 ---
 
@@ -184,7 +181,7 @@ The DRE is a **hardware-accelerated routing engine** integrated into the AURIX T
 
 - **Zero-copy routing**: Frames are moved directly from CAN FIFO → ETH TX buffer without CPU intervention.
 - **Parallel routing rules**: Supports hundreds of simultaneous routing table entries.
-- **Rate shaping**: Can throttle high-frequency CAN signals before Ethernet forwarding.
+- **Rate shaping**: Can throttle high-frequency CAN frames before Ethernet forwarding.
 - **Timestamping**: Hardware timestamps on both CAN and Ethernet side for latency measurement and time-synchronization (IEEE 802.1AS / gPTP).
 - **Interrupt offloading**: DRE triggers CPU only on exceptions (filter miss, overflow), minimizing jitter.
 
@@ -239,25 +236,11 @@ SecOC:                            MACsec (802.1AE):
 
 ---
 
-## 10. Integration with signalXautomotive S2S Infrastructure
+## 10. System Boundary
 
-```
-[Field ECU / Sensor]
-   │  CAN FD (up to 8 Mbit/s)
-   ▼
-[AURIX TC4 Gateway — DRE]
-   │  SOME/IP over 100BASE-T1
-   ▼
-[Ethernet Switch / Backbone]
-   │  SOME/IP / REST / gRPC
-   ▼
-[signalXautomotive S2S Broker]
-   │  Normalized Signal Stream
-   ▼
-[Consumer: ADAS | Cloud | OTA | Digital Twin]
-```
+The AURIX TC4 DRE delivers raw CAN frame payloads, encapsulated in SOME/IP/UDP/IP, onto the Automotive Ethernet backbone. **The scope of this document ends at the Ethernet output of the TC4 gateway.**
 
-The signalXautomotive platform receives the normalized SOME/IP stream from the TC4 gateway and exposes signals via a unified **Signal-to-Service (S2S)** API, abstracting the underlying CAN topology from higher-level consumers.
+Signal-to-Service (S2S) normalization, service discovery, and exposure to application consumers (ADAS, Cloud, OTA, Digital Twin) are addressed in a separate document.
 
 ---
 
@@ -265,7 +248,6 @@ The signalXautomotive platform receives the normalized SOME/IP stream from the T
 
 - [Infineon AURIX TC4xx Product Family](https://www.infineon.com/cms/en/product/microcontroller/32-bit-tricore-microcontroller/aurix-family/aurix-tc4xx-family/)
 - [AUTOSAR Classic Platform – COM Stack Specification](https://www.autosar.org/standards/classic-platform)
-- [AUTOSAR Adaptive Platform – SOME/IP Protocol](https://www.autosar.org/standards/adaptive-platform)
 - [SOME/IP Protocol Specification (AUTOSAR_PRS_SOMEIPProtocol)](https://www.autosar.org/fileadmin/user_upload/standards/foundation/1-3/AUTOSAR_PRS_SOMEIPProtocol.pdf)
 - [IEEE 802.1AE MACsec Standard](https://1.ieee802.org/security/802-1ae/)
 - [IEEE 802.1AS – Timing and Synchronization (gPTP)](https://1.ieee802.org/tsn/802-1as/)
